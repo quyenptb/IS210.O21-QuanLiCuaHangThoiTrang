@@ -116,7 +116,7 @@ python-jose==3.5.0
 python-multipart==0.0.20
 pytz==2024.1
 pyunormalize==17.0.0
-pywin32==310 # Gói Windows, sẽ bị bỏ qua trên Linux EC2
+#pywin32==310
 PyYAML==6.0.3
 pyzmq==26.4.0
 regex==2024.11.6
