@@ -16,6 +16,9 @@ from oracledb import DatabaseError
 from store.forms import CommentForm, CreateUserForm
 from store.models import *
 from django.db import transaction, connection
+from django.http import HttpResponse
+from admin_volt.utils import call_stored_procedure, generate_report, generate_report_with_chart  # Đảm bảo đúng đường dẫn
+import random
 
 
 # need to create forms and models
@@ -39,6 +42,7 @@ def store(request):
         order, created = Order.objects.get_or_create(
             customer=customer, complete=False)
         items = order.orderitem_set.all()
+        
         cartItems = order.get_cart_items
     else:
         items = []
@@ -196,6 +200,7 @@ def checkout(request):
         order = {'get_cart_items': 0, 'get_cart_total': 0, 'shipping': False}
         cartItems = order['get_cart_items']
     context = {'items': items, 'order': order, 'cartItems': cartItems}
+       
     return render(request, 'store/checkout.html', context)
 
 # updateItem view xử lý yêu cầu của người dùng để thêm hoặc xóa một sản phẩm trong giỏ hàng
@@ -232,6 +237,7 @@ def updateItem(request):
 # -> Lấy tổng số tiền của đơn hàng từ dữ liệu đã được chuyển đổi -> gán ID -> kiểm tra tiền -> lưu thay đổi vào csdl
 # -> kiểm tra thuộc tính của đơn hàng -> kiểm tra yêu cầu giao hàng -> tạo địa chỉ giao hàng mới
 
+'''store procedure'''
 def call_update_stock_before_order(order_id):
    with connection.cursor() as cursor:
      cursor.callproc('update_stock_before_order', [order_id])
@@ -240,13 +246,17 @@ def call_update_stock_before_order(order_id):
 def set_serializable_isolation_level():
     with connection.cursor() as cursor:
         cursor.execute('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
+
 @transaction.atomic
 def processOrder(request):
     try:
         set_serializable_isolation_level()
         with transaction.atomic():
             print('Received data:', request.body)
-            transaction_id = datetime.datetime.now().timestamp()
+            # Tạo transaction_id unique
+            transaction_timestamp = datetime.datetime.now().timestamp()
+            transaction_id_str = str(transaction_timestamp).replace('.', '') # Tạo chuỗi ID duy nhất
+            
             data = json.loads(request.body)
 
             if request.user.is_authenticated:
@@ -255,23 +265,27 @@ def processOrder(request):
 
                 order, created = Order.objects.get_or_create(
                     customer=customer, complete=False)
+                
                 if created:
                     print(f"Created new order with ID: {order.id}")
                 else:
                     print(f"Found existing order with ID: {order.id}")
 
                 total = float(data['form']['total'])
-                order.transaction_id = transaction_id
+                order.transaction_id = transaction_id_str
 
-                if total == order.get_cart_total:
+                # Kiểm tra tổng tiền (backend validation)
+                if total == float(order.get_cart_total):
                     order.complete = True
                     print(f"Order total matches cart total. Marking order {order.id} as complete.")
+                
                 order.save()
-                print(f"Order {order.id} saved with transaction ID: {transaction_id}")
+                print(f"Order {order.id} saved with transaction ID: {transaction_id_str}")
 
-                # Gọi stored procedure để cập nhật số lượng tồn kho
+                # Gọi stored procedure Oracle để cập nhật kho
                 call_update_stock_before_order(order.id)
 
+                # Lưu địa chỉ giao hàng
                 if order.shipping:
                     print(f"Creating shipping address for order {order.id}")
                     ShippingAddress.objects.create(
@@ -284,6 +298,59 @@ def processOrder(request):
                     )
                     print(f"Shipping address created for order {order.id}")
 
+                # ---------------------------------------------------------
+                # KAFKA INTEGRATION (PHẦN QUAN TRỌNG ĐÃ SỬA)
+                # ---------------------------------------------------------
+                if order.complete:
+                    try:
+                        # 1. Khởi tạo Producer
+                        producer = KafkaProducer(
+                            bootstrap_servers=['localhost:9092'], # Đảm bảo port này đúng với docker-compose
+                            value_serializer=lambda x: json.dumps(x).encode('utf-8'),
+                            request_timeout_ms=5000 # Timeout nhanh nếu lỗi để không treo Web
+                        )
+
+                        # 2. Lấy chi tiết các món hàng trong giỏ
+                        items = order.orderitem_set.all()
+                        
+                        list_stores_hanoi = ['Store_DongDa', 'Store_CauGiay', 'Store_HaiBaTrung', 'Store_ThanhXuan']
+                        list_stores_hcm = ['Store_Quan1', 'Store_Quan3', 'Store_Quan5', 'Store_Quan10']
+                        list_stores_dn = ['Store_HaiChau', 'Store_ThanhKhe', 'Store_LienChieu', 'Store_NguHanhSon']
+                        
+                        
+                        city_input = data['shipping']['city'].lower()
+                        if 'ho chi minh' in city_input: fake_store_id = random.choice(list_stores_hcm)
+                        elif 'ha noi' in city_input: fake_store_id = random.choice(list_stores_hanoi)
+                        elif 'da nang' in city_input: fake_store_id = random.choice(list_stores_dn)
+                        else: fake_store_id = 'Store_Online'
+
+                        # 3. Lặp qua từng món và gửi format PHẲNG (Flat JSON) cho Flink
+                        print(f"Start sending {len(items)} items to Kafka...")
+                        
+                        for item in items:
+                            # Cấu trúc này PHẢI khớp 100% với câu lệnh CREATE TABLE trong flink_job.py
+                            kafka_payload = {
+                                "transaction_id": str(order.transaction_id),
+                                "product_id": str(item.product.id),
+                                "quantity": int(item.quantity),
+                                "price": float(item.product.price),
+                                "timestamp": int(time.time() * 1000), # Milliseconds (BIGINT)
+                                "customer_id": customer.id,
+                                "store_id": fake_store_id  
+                            }
+                            
+                            producer.send('sales_transactions', value=kafka_payload)
+                            print(f" > Sent item: Product {item.product.id} - Qty {item.quantity}")
+
+                        # 4. Đẩy dữ liệu đi ngay lập tức
+                        producer.flush()
+                        print("LOG: All Kafka messages sent successfully.")
+
+                    except Exception as k_error:
+                        # Log lỗi Kafka nhưng KHÔNG rollback đơn hàng (bán được hàng quan trọng hơn realtime report)
+                        print(f"WARNING: Kafka Error (Data not sent to Flink): {k_error}")
+                # ---------------------------------------------------------
+
             else:
                 print('User is not logged in.')
                 return JsonResponse('User is not logged in.', status=401, safe=False)
@@ -292,16 +359,70 @@ def processOrder(request):
         return JsonResponse('Payment complete!', safe=False)
 
     except DatabaseError as e:
-        # Rollback transaction in case of database error
         transaction.rollback()
         print('Database error occurred:', e)
         return JsonResponse({'error': 'Database error: ' + str(e)}, status=500, safe=False)
     except Exception as e:
-        # Rollback transaction in case of other errors
         transaction.rollback()
         print('Error occurred:', e)
         return JsonResponse({'error': 'Error: ' + str(e)}, status=500, safe=False)
+'''
+#@transaction.atomic
+def processOrder(request):
+    try:
+        print('Received data:', request.body)
+        transaction_id = datetime.datetime.now().timestamp()
+        data = json.loads(request.body)
 
+        if request.user.is_authenticated:
+            customer = request.user
+            print(f"Processing order for authenticated user: {customer.username}")
+
+            order, created = Order.objects.get_or_create(
+                customer=customer, complete=False)
+            if created:
+                print(f"Created new order with ID: {order.id}")
+            else:
+                print(f"Found existing order with ID: {order.id}")
+
+            total = float(data['form']['total'])
+            order.transaction_id = transaction_id
+
+            if total == order.get_cart_total:
+                order.complete = True
+                print(f"Order total matches cart total. Marking order {order.id} as complete.")
+            order.save()
+            print(f"Order {order.id} saved with transaction ID: {transaction_id}")
+
+            # Gọi stored procedure để cập nhật số lượng tồn kho
+            call_update_stock_before_order(order.id)
+
+            if order.shipping:
+                print(f"Creating shipping address for order {order.id}")
+                ShippingAddress.objects.create(
+                    customer=customer,
+                    order=order,
+                    address=data['shipping']['address'],
+                    city=data['shipping']['city'],
+                    state=data['shipping']['state'],
+                    zipcode=data['shipping']['zipcode'],
+                )
+                print(f"Shipping address created for order {order.id}")
+
+        else:
+            print('User is not logged in.')
+            return JsonResponse('User is not logged in.', status=401, safe=False)
+
+        print("Order processing completed successfully.")
+        return JsonResponse('Payment complete!', safe=False)
+
+    except DatabaseError as e:
+        print('Database error occurred:', e)
+        return JsonResponse({'error': 'Database error: ' + str(e)}, status=500, safe=False)
+    except Exception as e:
+        print('Error occurred:', e)
+        return JsonResponse({'error': 'Error: ' + str(e)}, status=500, safe=False)
+'''
 # Login page view xử lý yêu cầu của người dùng để đăng nhập
 # -> nếu người dùng đã đăng nhập, chuyển hướng người dùng đến trang chủ
 # -> nếu người dùng chưa đăng nhập, kiểm tra yêu cầu của người dùng -> kiểm tra thông tin đăng nhập
@@ -367,3 +488,22 @@ def add_to_cart(request):
         # Now you can add the product to the cart
 
 
+def download_report(request):
+    # Call the stored procedure to get results
+    results = call_stored_procedure()
+    
+    # Convert any VariableWrapper objects to their actual values
+    for i, row in enumerate(results):
+        results[i] = [value.value if isinstance(value, VariableWrapper) else value for value in row]
+
+    # Generate report from the modified results
+    wb = generate_report(results)
+
+    # Prepare the HTTP response
+    response = HttpResponse(content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    response['Content-Disposition'] = 'attachment; filename=shipping_addresses_report.xlsx'
+
+    # Save the workbook to the response
+    wb.save(response)
+
+    return response

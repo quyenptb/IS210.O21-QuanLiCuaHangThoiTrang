@@ -21,7 +21,7 @@ from django.conf.urls.static import static
 from django.conf import settings
 from controlcenter.views import controlcenter
 from admin_notification.views import check_notification_view
-from admin_volt.views import download_report  # Đảm bảo import đúng
+from store.views import download_report  # Đảm bảo import đúng
 
 
 urlpatterns = [
@@ -29,6 +29,7 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('dashboard/', controlcenter.urls),
     path ('',include('store.urls')),
+    path('admin/store/shippingaddress/download_report/', download_report, name='download_report'),
 
 ]
 

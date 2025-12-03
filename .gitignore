@@ -3,8 +3,13 @@
 debug.log
 /store_dj/settings.py
 
+project_combiner.py
+
 #ignore python env
 env/
 
 #ignore storing images from local server 
 # /static/images/
+
+
+/exported_source_code

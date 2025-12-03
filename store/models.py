@@ -7,6 +7,8 @@ from django.contrib.auth.models import User
 from django.contrib.auth.models import AbstractUser
 from django.dispatch import receiver 
 from django.db.models.signals import post_save
+from django.db import connection, transaction
+import cx_Oracle
 # adding new imports
 from django.core.validators import MinValueValidator
 from django.core.exceptions import ValidationError
@@ -39,6 +41,11 @@ class Product(models.Model):
     stock = models.IntegerField(null=True, blank=True, validators=[MinValueValidator(0)])
     stock_limit = models.IntegerField(null=True, blank=True, validators=[MinValueValidator(1)])
 
+    
+    def update_price(self, new_price):
+        with connection.cursor() as cursor:
+            cursor.callproc('update_product_price', [self.id, new_price])
+            
     def save(self, *args, **kwargs):
         if self.stock >= self.stock_limit:
             raise ValidationError("Stock must be lower than stock limit")
@@ -73,19 +80,49 @@ class Order(models.Model):
             return str(self.customer)
         return "Unknown"
    
-
+    '''xử lí mức lập trình'''
     @property
-    def get_cart_total(self):
+    def get_cart_total_(self):
         orderitems = self.orderitem_set.all()
         total = sum([item.get_total for item in orderitems])
         self.total_money = total
         self.save()
-        return total
+        return total 
+
     @property
     def get_cart_items(self):
         orderitems = self.orderitem_set.all()
         total = sum([item.quantity for item in orderitems])
-        return total
+        return total  
+    
+    '''store procedure'''
+    @property
+    def get_cart_total(self):
+        try:
+            cursor = connection.cursor()
+            # Gọi hàm calculate_cart_total và nhận kết quả trả về
+            result = cursor.callfunc("calculate_cart_total", cx_Oracle.NUMBER, [self.id])
+            
+            print('------------------------------------------------')
+            print('Đây là số tiền mà dự kiến Quyên phải trả: ', result)
+            print('------------------------------------------------')
+            
+            # Cập nhật total_money với giá trị tính được
+            self.total_money = result
+            self.save()
+
+            return self.total_money
+
+        except cx_Oracle.DatabaseError as e:
+            # Xử lý lỗi kết nối Oracle
+            error, = e.args
+            print(f"Oracle error code: {error.code}")
+            print(f"Oracle error message: {error.message}")
+        finally:
+            # Đảm bảo đóng cursor sau khi hoàn thành
+            cursor.close()
+
+    
     @property
     def shipping(self):
         shipping=False
@@ -187,3 +224,76 @@ def create_user_customer(sender, instance, created, **kwargs):
 	print('****', created)
 	if instance.is_staff == False:
 		Customer.objects.get_or_create(user = instance, name = instance.username, email = instance.email)
+
+
+import json
+import time
+from kafka import KafkaProducer
+import logging
+
+# Cấu hình Logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class SalesProducer:
+    def __init__(self, bootstrap_servers='localhost:9092'):
+        try:
+            self.producer = KafkaProducer(
+                bootstrap_servers=bootstrap_servers,
+                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                acks='all',  # Đảm bảo Kafka đã nhận được tin
+                retries=3
+            )
+            logger.info("Kafka Producer connected successfully.")
+        except Exception as e:
+            logger.error(f"Failed to connect to Kafka: {e}")
+            self.producer = None
+
+    def send_order(self, order_data):
+        """
+        Gửi dữ liệu đơn hàng vào Kafka topic 'sales_transactions'
+        
+        Expected order_data format:
+        {
+            "transaction_id": "T123",
+            "product_id": "P001",
+            "quantity": 2,
+            "price": 100.0,
+            "timestamp": 1715421000000, (Unix ms)
+            "customer_id": 1
+        }
+        """
+        if not self.producer:
+            logger.warning("Kafka Producer is not available. Skipping message.")
+            return
+
+        try:
+            topic = 'sales_transactions'
+            # Gửi bất đồng bộ (fire and forget)
+            future = self.producer.send(topic, order_data)
+            # Chờ xác nhận (chỉ dùng khi debug, production nên bỏ dòng này để nhanh)
+            record_metadata = future.get(timeout=10)
+            
+            logger.info(f"Sent to Kafka topic {record_metadata.topic} partition {record_metadata.partition} offset {record_metadata.offset}")
+            print(f"[Kafka] Sent Order: {order_data['transaction_id']}")
+            
+        except Exception as e:
+            logger.error(f"Error sending data to Kafka: {e}")
+
+# Helper function để gọi nhanh từ Django View
+# Usage: 
+# from kafka_service import send_order_to_kafka
+# send_order_to_kafka(transaction_id, product_id, quantity, price, customer_id)
+
+producer_instance = SalesProducer()
+
+def send_order_to_kafka(transaction_id, product_id, quantity, price, customer_id):
+    data = {
+        "transaction_id": str(transaction_id),
+        "product_id": str(product_id),
+        "quantity": int(quantity),
+        "price": float(price),
+        "timestamp": int(time.time() * 1000), # Current time in ms
+        "customer_id": int(customer_id)
+    }
+    producer_instance.send_order(data)

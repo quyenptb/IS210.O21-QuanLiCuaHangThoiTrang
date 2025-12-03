@@ -4,7 +4,9 @@ from django.template import Context
 from django.utils import translation
 import cx_Oracle
 from django.conf import settings
-from django.db import connection
+from django.db import connection, transaction
+
+
 # utils.py
 import openpyxl
 from openpyxl.workbook import Workbook
@@ -476,21 +478,21 @@ def user_is_authenticated(user):
     else:
         return user.is_authenticated()
 
+import cx_Oracle
+from django.db import connection
+
+@transaction.atomic
 def call_stored_procedure():
     try:
-        cursor = connection.cursor()
-        
-        # Thực hiện stored procedure
-        result_cursor = cursor.var(cx_Oracle.CURSOR)
-        cursor.callproc("get_shipping_addresses", [result_cursor])
-        
-        # Lấy dữ liệu từ result_cursor
-        results = result_cursor.getvalue().fetchall()
-        return results
+        django_cursor = connection.cursor()
+        raw_cursor = django_cursor.connection.cursor()
+        out_arg = raw_cursor.var(cx_Oracle.CURSOR)
+        raw_cursor.callproc("get_shipping_addresses", [out_arg])
+        out_val = out_arg.getvalue()
+   
+        return out_val
     finally:
-        cursor.close()
-
-
+        django_cursor.close()
 
 def generate_report(data):
     # Tạo workbook và worksheet
@@ -499,11 +501,44 @@ def generate_report(data):
     ws.title = "Shipping Addresses Report"
 
     # Thêm tiêu đề cột
-    columns = ['Customer', 'Order', 'Name', 'Address', 'City', 'State', 'Zipcode', 'Date Added']
+    columns = ['Customer', 'Order', 'Address', 'City', 'State', 'Zipcode', 'Date Added']
+    ws.append(columns)
+
+    from openpyxl.styles import Font, Color, Alignment, Border, Side
+
+    # Thêm dữ liệu từ stored procedure vào báo cáo
+    for row in data:
+        ws.append(row)  # Giả sử dữ liệu trả về là list of tuples
+
+    # Thay đổi kiểu chữ của tiêu đề cột
+    for cell in ws[1]:
+     cell.font = Font(bold=True)
+     cell.border = Border(bottom=Side(border_style="thin"))
+     cell.alignment = Alignment(horizontal="center")
+
+    return wb
+
+from openpyxl.chart import BarChart, Reference
+
+def generate_report_with_chart(data):
+    # Tạo workbook và worksheet
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Shipping Addresses Report"
+
+    # Thêm tiêu đề cột
+    columns = ['Customer', 'Order', 'Address', 'City', 'State', 'Zipcode', 'Date Added']
     ws.append(columns)
 
     # Thêm dữ liệu từ stored procedure vào báo cáo
     for row in data:
         ws.append(row)  # Giả sử dữ liệu trả về là list of tuples
 
+    # Tạo biểu đồ
+    chart = BarChart()
+    data = Reference(ws, min_col=5, min_row=1, max_row=ws.max_row, max_col=5)
+    chart.add_data(data, titles_from_data=True)
+    ws.add_chart(chart, "A10")  # Thêm biểu đồ vào vị trí A10
+
     return wb
+

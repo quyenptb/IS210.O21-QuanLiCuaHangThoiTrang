@@ -95,13 +95,15 @@ WSGI_APPLICATION = 'store_dj.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.oracle',
-        'NAME': 'orcl',
-        'USER': 'c##bq1',
+        'NAME': 'localhost:1521/ORCL21PDB1',  # dùng service name theo Easy Connect
+        'USER': 'bq1',
         'PASSWORD': 'bq',
-        'HOST': 'localhost',
-        'PORT': '1521'
+        'OPTIONS': {
+            'isolation_level': 'read committed',
+        }
     }
 }
+
 
 
 # Password validation
