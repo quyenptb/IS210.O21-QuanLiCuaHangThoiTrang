@@ -25,7 +25,7 @@ cx_Oracle==8.3.0
 cymem==2.0.10
 debugpy==1.8.14
 decorator==5.2.1
-Django==4.1
+Django==4.2.16
 django-controlcenter==0.3.2
 django-cors-headers==3.7.0
 django-pkgconf==0.4.0
