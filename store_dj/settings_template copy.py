@@ -10,7 +10,14 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/3.0/ref/settings/
 """
 import cx_Oracle
-cx_Oracle.init_oracle_client(lib_dir=r"C:\Users\DungManh Laptop\Downloads\instantclient-basic-windows.x64-21.13.0.0.0dbru\instantclient_21_13")
+#cx_Oracle.init_oracle_client(lib_dir=r"C:\Users\DungManh Laptop\Downloads\instantclient-basic-windows.x64-21.13.0.0.0dbru\instantclient_21_13")
+
+import platform
+if platform.system() == 'Windows':
+    cx_Oracle.init_oracle_client(lib_dir=r"C:\Users\...")
+else:
+    # Trên Linux, Oracle Client cài qua biến môi trường LD_LIBRARY_PATH, không cần init path
+    pass
 
 
 import os
@@ -92,6 +99,7 @@ WSGI_APPLICATION = 'store_dj.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/3.0/ref/settings/#databases
 
+'''
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.oracle',
@@ -101,6 +109,18 @@ DATABASES = {
         'OPTIONS': {
             'isolation_level': 'read committed',
         }
+    }
+}
+'''
+
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.oracle',
+        'NAME': 'ORCL', 
+        'USER': 'admin',                    
+        'PASSWORD': 'x0zQ8flX2)!A_<b?B#fx1!u$aTF7', 
+        'HOST': 'database-1.cyremys6azm4.us-east-1.rds.amazonaws.com', 
+        'PORT': '1521',                     
     }
 }
 
